@@ -1,0 +1,45 @@
+# Rust build artifacts
+/target/
+Cargo.lock
+
+# Temporary files
+/temp/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Debug executables
+*.exe
+*.pdb
+
+# Log files
+*.log
+
+# Backup files
+*.bak
+*.backup
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Documentation build
+/book/
+
+# pdf files
+*.pdf
+*.svg
