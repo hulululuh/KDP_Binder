@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 mod process_pages;
+mod binding_params;
+use binding_params::UnitSystem;
 
 /// Bind front + SVGs + back into a single PDF (vector)
 #[derive(Parser, Debug)]
@@ -19,8 +21,8 @@ struct Args {
     #[arg(long, default_value_t = 8.5)]
     height: f64,
     /// Unit type: "in" or "cm" (default: in)
-    #[arg(long, default_value = "in")]
-    r#type: String,
+    #[arg(value_enum, default_value_t = UnitSystem::Inch)]
+    unit_system: UnitSystem,
     /// If true, and front_matter page count is odd, insert a blank page to make it even
     #[arg(long, default_value_t = false)]
     make_even: bool,
@@ -35,7 +37,7 @@ impl Args {
         Args {
             width: 8.5,
             height: 8.5,
-            r#type: "in".to_string(),
+            unit_system: UnitSystem::Inch,
             make_even: false,
             arc: false,
         }
@@ -46,7 +48,7 @@ impl Args {
         Args {
             width: 8.5,
             height: 8.5,
-            r#type: "in".to_string(),
+            unit_system: UnitSystem::Inch,
             make_even: false,
             arc: true,
         }
@@ -228,7 +230,7 @@ fn svg_to_page_pdf_bytes(svg_path: &Path, w_pt: f64, h_pt: f64) -> Result<Vec<u8
 }
 
 fn make_pdf(args: Args, output: String) -> Result<(), Box<dyn std::error::Error>> {
-    let unit = args.r#type.as_str();
+    let unit = args.unit_system.as_str();
     let w_pt = to_points(args.width, unit);
     let h_pt = to_points(args.height, unit);
 
