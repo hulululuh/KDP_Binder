@@ -25,6 +25,17 @@ pub struct BookParams {
     pub pages: i64,
 }
 
+impl BookParams {
+    pub fn new(width: f64, height: f64, unit_system: UnitSystem, pages: i64) -> Self {
+        Self {
+            width,
+            height,
+            unit_system,
+            pages,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct BookBindingConstant {
     /// per-edge bleed (usually 0.125")
@@ -51,7 +62,7 @@ pub struct Size {
     pub height: f64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct Rect {
     pub x: f64,
     pub y: f64,
@@ -108,7 +119,7 @@ impl Book {
 const THICKNESS_WHITE: f64 = 0.002252;
 const THICKNESS_CREAM: f64 = 0.0025;
 
-const BINDING_PARAMS_KDP_WHITE: BookBindingConstant = BookBindingConstant {
+pub const BINDING_PARAMS_KDP_WHITE: BookBindingConstant = BookBindingConstant {
     bleed_cover: 0.125,         // KDP default
     margin_cover: 0.125,        // conservative cover margin when bleed is present
     thickness: THICKNESS_WHITE, // example: 120p B/W White (0.002252 * 120 ≈ 0.270; varies by vendor)
@@ -116,7 +127,7 @@ const BINDING_PARAMS_KDP_WHITE: BookBindingConstant = BookBindingConstant {
     margin_inner: 0.25,         // outer margin safety margin
 };
 
-const BINDING_PARAMS_KDP_CREAM: BookBindingConstant = BookBindingConstant {
+pub const BINDING_PARAMS_KDP_CREAM: BookBindingConstant = BookBindingConstant {
     bleed_cover: 0.125,         // KDP default
     margin_cover: 0.125,        // conservative cover margin when bleed is present
     thickness: THICKNESS_CREAM, // example: 120p B/W Cream (0.0025 * 120 ≈ 0.300; varies by vendor)

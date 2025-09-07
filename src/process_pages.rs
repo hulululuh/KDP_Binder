@@ -1,6 +1,7 @@
 use lopdf::{Document, Object, ObjectId, Stream, Dictionary};
 use lopdf::content::Content;
 use std::error::Error;
+use crate::binding_params::Book;
 
 // ========== small helpers ==========
 #[inline]
@@ -416,8 +417,6 @@ pub fn stamp_watermarks(doc: &mut Document) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-
-
 fn as_f64(n: &Object) -> Option<f64> {
     match n {
         Object::Integer(i) => Some(*i as f64),
@@ -451,11 +450,203 @@ fn effective_mediabox(doc: &Document, page_id: ObjectId) -> Option<(f64, f64, f6
     None
 }
 
+#[derive(Clone, Copy)]
+enum AxisAnchor { Start, Center, End }
+
+#[derive(Clone, Copy)]
+enum FitMode { Contain, Cover }
+
+#[inline]
+fn anchor_value(start: f64, end: f64, a: AxisAnchor) -> f64 {
+    match a {
+        AxisAnchor::Start  => start,
+        AxisAnchor::Center => 0.5 * (start + end),
+        AxisAnchor::End    => end,
+    }
+}
+
+/// U(콘텐츠 AABB) → S(세이프 AABB)로 등방 스케일 + 피벗 정렬
+fn fit_with_anchor(
+    ux0: f64, uy0: f64, ux1: f64, uy1: f64,
+    sx0: f64, sy0: f64, sx1: f64, sy1: f64,
+    ax: AxisAnchor, ay: AxisAnchor,
+    mode: FitMode, s_max: f64, // 희소면 1.0, 일반은 f64::INFINITY 권장
+) -> (f64, f64, f64) {
+    let (uw, uh) = (ux1 - ux0, uy1 - uy0);
+    let (sw, sh) = (sx1 - sx0, sy1 - sy0);
+    let s0 = match mode {
+        FitMode::Contain => (sw / uw).min(sh / uh),
+        FitMode::Cover   => (sw / uw).max(sh / uh),
+    };
+    let s = s0.min(s_max);
+
+    let u_px = anchor_value(ux0, ux1, ax);
+    let u_py = anchor_value(uy0, uy1, ay);
+    let s_px = anchor_value(sx0, sx1, ax);
+    let s_py = anchor_value(sy0, sy1, ay);
+
+    let tx = s_px - s * u_px;
+    let ty = s_py - s * u_py;
+    (s, tx, ty) // PDF 'cm' 파라미터: a b c d e f = s 0 0 s tx ty
+}
+
+
+/// CropBox > TrimBox > MediaBox 우선으로 페이지 박스
+fn effective_page_box(doc: &Document, page_id: ObjectId) -> Option<(f64, f64, f64, f64)> {
+    let page = doc.get_object(page_id).ok()?.as_dict().ok()?;
+    let try_box = |name: &[u8]| -> Option<(f64,f64,f64,f64)> {
+        let a = page.get(name).ok()?.as_array().ok()?;
+        if a.len() != 4 { return None; }
+        Some((as_f64(&a[0])?, as_f64(&a[1])?, as_f64(&a[2])?, as_f64(&a[3])?))
+    };
+    try_box(b"CropBox")
+        .or_else(|| try_box(b"TrimBox"))
+        .or_else(|| effective_mediabox(doc, page_id))
+}
+
+/// TODO: “실잉크 AABB(U)”를 계산하는 자리.
+/// 현재는 임시로 페이지 박스 반환. 이후 실제 U 계산기를 붙이면 그대로 품질↑
+fn page_ink_bbox(doc: &Document, page_id: ObjectId) -> Option<(f64, f64, f64, f64)> {
+    effective_page_box(doc, page_id)
+}
+
+pub fn apply_inner_margin(doc: &mut Document, book: Book) -> Result<(), Box<dyn Error>> {
+    // 1) Safe area (in → pt)
+    let mut safe_left  = book.get_safe_area(true);
+    let mut safe_right = book.get_safe_area(false);
+    for s in [&mut safe_left, &mut safe_right] {
+        s.x     *= 72.0; s.y      *= 72.0;
+        s.width *= 72.0; s.height *= 72.0;
+    }
+    let epsilon = 0.001; // 경계 접촉 방지 미세 여유
+
+    // 2) 모든 페이지 순회
+    let page_ids: Vec<ObjectId> = doc.get_pages().values().cloned().collect();
+
+    for (i, pid) in page_ids.iter().enumerate() {
+        // 2-1) 페이지/세이프 박스
+        let (pb_llx, pb_lly, pb_urx, pb_ury) =
+            effective_page_box(doc, *pid).ok_or("Page has no box")?;
+        let safe = if (i + 1) % 2 == 1 { // 1-based 홀수=오른쪽
+            &safe_right
+        } else {
+            &safe_left
+        };
+        // S 박스 좌표 (epsilon으로 살짝 안쪽으로)
+        let (sx0, sy0, sx1, sy1) = (
+            safe.x + epsilon,
+            safe.y + epsilon,
+            safe.x + safe.width  - epsilon,
+            safe.y + safe.height - epsilon,
+        );
+
+        // 2-2) U(콘텐츠 AABB) — 현재는 페이지 박스로 대체
+        let (ux0, uy0, ux1, uy1) =
+            page_ink_bbox(doc, *pid).unwrap_or((pb_llx, pb_lly, pb_urx, pb_ury));
+
+        // 2-3) 희소 판정 (U가 정말로 작을 때만 희소로)
+        let u_area = (ux1 - ux0).max(0.0) * (uy1 - uy0).max(0.0);
+        let s_area = (sx1 - sx0).max(0.0) * (sy1 - sy0).max(0.0);
+        let area_ratio = if s_area > 0.0 { u_area / s_area } else { 1.0 };
+
+        // 히스테리시스/정교화 가능. 임시 기준: 0.12 미만이면 희소 취급
+        let is_sparse = area_ratio < 0.12;
+
+        // 2-4) 피팅 모드/피벗/스케일 상한 결정
+        let (ax, ay, s_max, mode) = if is_sparse {
+            // 바닥 중앙(anchor: Center×Bottom), 업스케일 방지
+            (AxisAnchor::Center, AxisAnchor::Start, 1.0_f64, FitMode::Contain)
+        } else {
+            // 일반은 중앙(anchor: Center×Center), 제한 없음(다운스케일은 자연스럽게 됨)
+            (AxisAnchor::Center, AxisAnchor::Center, f64::INFINITY, FitMode::Contain)
+        };
+
+        // 2-5) 변환행렬 파라미터 계산
+        let (s, tx, ty) = fit_with_anchor(
+            ux0, uy0, ux1, uy1,
+            sx0, sy0, sx1, sy1,
+            ax, ay, mode, s_max,
+        );
+
+        // 2-6) 기존 Contents를 Form XObject로 래핑
+        let old_streams = page_content_streams(doc, *pid)?;
+        if old_streams.is_empty() {
+            // 빈 페이지면 패스
+            continue;
+        }
+
+        // concatenate bytes (borrow 충돌 방지: 먼저 로컬로 모아둔다)
+        let mut concat = Vec::<u8>::new();
+        for sstream in &old_streams {
+            concat.extend_from_slice(&sstream.content);
+            concat.push(b'\n');
+        }
+
+        // Form XObject 사전 준비 (기존 리소스를 폼 안으로 옮김)
+        let mut form_dict = Dictionary::new();
+        form_dict.set("Type", "XObject");
+        form_dict.set("Subtype", "Form");
+        form_dict.set("FormType", 1);
+        form_dict.set("BBox", Object::Array(vec![
+            pb_llx.into(), pb_lly.into(), pb_urx.into(), pb_ury.into()
+        ]));
+
+        // 페이지의 /Resources를 폼으로 이관(없으면 비움)
+        let page_ro = doc.get_object(*pid)?.as_dict()?.clone();
+        if let Some(obj) = page_ro.get(b"Resources").ok() {
+            if let Some(res) = obj_as_dict_owned(obj, doc) {
+                form_dict.set("Resources", Object::Dictionary(res));
+            }
+        }
+        // Form 객체 생성
+        let form_id = {
+            let id = doc.new_object_id();
+            doc.objects.insert(id, Object::Stream(Stream::new(form_dict, concat)));
+            id
+        };
+
+        // 2-7) 페이지 리소스에 /XObject 등록(페이지 콘텐츠는 폼만 호출)
+        // 새 리소스(최소 구성): XObject 딕셔너리만
+        let mut xobjs = Dictionary::new();
+        xobjs.set("CNT", Object::Reference(form_id));
+        let mut new_res = Dictionary::new();
+        new_res.set("XObject", Object::Dictionary(xobjs));
+
+        // 1) 먼저 새 Contents 스트림을 만들어서 doc에 삽입
+        let draw = format!("q\n{s:.9} 0 0 {s:.9} {tx:.9} {ty:.9} cm\n/CNT Do\nQ\n");
+        let draw_id = doc.new_object_id();
+        let draw_stream = Object::Stream(Stream::new(Dictionary::new(), draw.into_bytes()));
+        doc.objects.insert(draw_id, draw_stream);
+
+        // 2) 그 다음에 페이지 딕셔너리를 '짧게' 빌려서 필드만 세팅
+        {
+            let page_mut = doc.get_object_mut(*pid)?;
+            let pd = page_mut.as_dict_mut()?;
+            pd.set("Resources", Object::Dictionary(new_res));
+            pd.set("Contents", Object::Reference(draw_id));
+        } // <- 여기서 가변 대여가 즉시 해제됨
+
+    }
+
+    // (선택) 쓸모없어진 객체 정리
+    doc.renumber_objects();
+    let _ = doc.prune_objects();
+
+    Ok(())
+}
+
 
 pub fn post_process_arc(doc: &mut Document) -> Result<(), Box<dyn Error>> {
     let _ = doc.decompress();
     remove_blank_pages(doc)?;
     stamp_watermarks(doc)?;
+    _ = doc.compress();
+    Ok(())
+}
+
+pub fn post_process_book(doc: &mut Document, book: Book) -> Result<(), Box<dyn Error>> {
+    let _ = doc.decompress();
+    apply_inner_margin(doc, book)?;
     _ = doc.compress();
     Ok(())
 }

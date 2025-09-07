@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 mod process_pages;
 mod binding_params;
-use binding_params::UnitSystem;
+use binding_params::{UnitSystem, BookParams, Book, BINDING_PARAMS_KDP_WHITE};
 
 /// Bind front + SVGs + back into a single PDF (vector)
 #[derive(Parser, Debug)]
@@ -23,6 +23,9 @@ struct Args {
     /// Unit type: "in" or "cm" (default: in)
     #[arg(value_enum, default_value_t = UnitSystem::Inch)]
     unit_system: UnitSystem,
+    /// Number of pages (default: 1)
+    #[arg(long, default_value_t = 50)]
+    num_pages: i64,
     /// If true, and front_matter page count is odd, insert a blank page to make it even
     #[arg(long, default_value_t = false)]
     make_even: bool,
@@ -38,6 +41,7 @@ impl Args {
             width: 8.5,
             height: 8.5,
             unit_system: UnitSystem::Inch,
+            num_pages: 50,
             make_even: false,
             arc: false,
         }
@@ -49,6 +53,7 @@ impl Args {
             width: 8.5,
             height: 8.5,
             unit_system: UnitSystem::Inch,
+            num_pages: 50,
             make_even: false,
             arc: true,
         }
@@ -289,6 +294,10 @@ fn make_pdf(args: Args, output: String) -> Result<(), Box<dyn std::error::Error>
 
     if args.arc {
         process_pages::post_process_arc(&mut merged)?;
+    } else {
+        let book_params = BookParams::new(args.width, args.height, args.unit_system, args.num_pages);
+        let book = Book::new(book_params, BINDING_PARAMS_KDP_WHITE);
+        process_pages::post_process_book(&mut merged, book)?;
     }
 
     merged.save(out)?;
@@ -297,7 +306,7 @@ fn make_pdf(args: Args, output: String) -> Result<(), Box<dyn std::error::Error>
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    make_pdf(Args::arc(), String::from("./book_ARC.pdf"))?;
     make_pdf(Args::book(), String::from("./book.pdf"))?;
+    make_pdf(Args::arc(), String::from("./book_ARC.pdf"))?;
     Ok(())
 }
